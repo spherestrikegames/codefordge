@@ -1,6 +1,7 @@
 import express, { Request, Response } from 'express';
 import path from 'path';
 import fs from 'fs';
+import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI } from '@google/genai';
 
@@ -33,6 +34,16 @@ export type SupportedLanguage =
   | 'css' | 'json' | 'markdown' | 'c' | 'cpp' | 'rust' 
   | 'go' | 'java' | 'bash' | 'sql' | 'plaintext';
 
+export interface UserAccount {
+  id: string;
+  email: string;
+  passwordHash: string;
+  salt: string;
+  name: string;
+  avatar: string;
+  createdAt: string;
+}
+
 export interface Snippet {
   id: string;
   slug: string;
@@ -40,6 +51,7 @@ export interface Snippet {
   description: string;
   language: SupportedLanguage;
   folderId: string;
+  userId?: string;
   html: string;
   css: string;
   js: string;
@@ -57,6 +69,7 @@ export interface Folder {
   id: string;
   name: string;
   color: string;
+  userId?: string;
   createdAt: string;
 }
 
@@ -78,6 +91,8 @@ export interface SharedProject {
 }
 
 interface StoreData {
+  users: UserAccount[];
+  sessions: Record<string, string>; // token -> userId
   folders: Folder[];
   snippets: Snippet[];
   shares: Record<string, SharedProject>;
@@ -92,31 +107,35 @@ function slugify(text: string): string {
     .replace(/^-+|-+$/g, '') || 'project';
 }
 
-const DEFAULT_FOLDERS: Folder[] = [
-  { id: 'f_web', name: 'Web Applications', color: '#EC4899', createdAt: new Date().toISOString() },
-  { id: 'f_python', name: 'Python Scripts', color: '#10B981', createdAt: new Date().toISOString() },
-  { id: 'f_tools', name: 'Developer Tools', color: '#6366F1', createdAt: new Date().toISOString() },
-];
+function hashPassword(password: string, salt: string): string {
+  return crypto.pbkdf2Sync(password, salt, 1000, 64, 'sha512').toString('hex');
+}
 
-const DEFAULT_SNIPPETS: Snippet[] = [];
+const DEFAULT_FOLDERS: Folder[] = [
+  { id: 'f_web', name: 'Web Apps', color: '#EA4335', createdAt: new Date().toISOString() },
+  { id: 'f_python', name: 'Python Scripts', color: '#34A853', createdAt: new Date().toISOString() },
+  { id: 'f_tools', name: 'Utilities', color: '#4285F4', createdAt: new Date().toISOString() },
+];
 
 function loadStore(): StoreData {
   try {
     if (fs.existsSync(DATA_FILE)) {
       const raw = fs.readFileSync(DATA_FILE, 'utf-8');
       const data = JSON.parse(raw);
-      if (Array.isArray(data.snippets)) {
-        return {
-          folders: data.folders || DEFAULT_FOLDERS,
-          snippets: data.snippets,
-          shares: data.shares || {}
-        };
-      }
+      return {
+        users: data.users || [],
+        sessions: data.sessions || {},
+        folders: data.folders || DEFAULT_FOLDERS,
+        snippets: data.snippets || [],
+        shares: data.shares || {}
+      };
     }
   } catch (err) {
     console.error('Error reading store:', err);
   }
   return {
+    users: [],
+    sessions: {},
     folders: DEFAULT_FOLDERS,
     snippets: [],
     shares: {}
@@ -133,17 +152,140 @@ function saveStore(data: StoreData) {
 
 let store = loadStore();
 
-// --- REST API ---
+// Helper to get authenticated user from Request header
+function getAuthUser(req: Request): UserAccount | null {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return null;
+  }
+  const token = authHeader.split(' ')[1];
+  const userId = store.sessions[token];
+  if (!userId) return null;
+  return store.users.find(u => u.id === userId) || null;
+}
 
-app.post('/api/reset', (req: Request, res: Response) => {
-  store.snippets = [];
-  store.shares = {};
+// --- AUTHENTICATION API ---
+
+app.post('/api/auth/register', (req: Request, res: Response) => {
+  const { email, password, name } = req.body;
+  if (!email || !password) {
+    res.status(400).json({ error: 'Email and password are required' });
+    return;
+  }
+
+  const cleanEmail = email.toLowerCase().trim();
+  if (store.users.some(u => u.email === cleanEmail)) {
+    res.status(409).json({ error: 'An account with this email already exists' });
+    return;
+  }
+
+  const salt = crypto.randomBytes(16).toString('hex');
+  const passwordHash = hashPassword(password, salt);
+  const newUser: UserAccount = {
+    id: 'usr_' + crypto.randomBytes(8).toString('hex'),
+    email: cleanEmail,
+    passwordHash,
+    salt,
+    name: name?.trim() || cleanEmail.split('@')[0],
+    avatar: `https://api.dicebear.com/7.x/identicon/svg?seed=${cleanEmail}`,
+    createdAt: new Date().toISOString()
+  };
+
+  store.users.push(newUser);
+  const token = 'tok_' + crypto.randomBytes(24).toString('hex');
+  store.sessions[token] = newUser.id;
   saveStore(store);
-  res.json({ success: true, message: 'All snippets and shares cleared' });
+
+  res.status(201).json({
+    token,
+    user: {
+      id: newUser.id,
+      email: newUser.email,
+      name: newUser.name,
+      avatar: newUser.avatar,
+      createdAt: newUser.createdAt
+    }
+  });
 });
 
+app.post('/api/auth/login', (req: Request, res: Response) => {
+  const { email, password } = req.body;
+  if (!email || !password) {
+    res.status(400).json({ error: 'Email and password are required' });
+    return;
+  }
+
+  const cleanEmail = email.toLowerCase().trim();
+  const user = store.users.find(u => u.email === cleanEmail);
+  if (!user) {
+    res.status(401).json({ error: 'Invalid email or password' });
+    return;
+  }
+
+  const hash = hashPassword(password, user.salt);
+  if (hash !== user.passwordHash) {
+    res.status(401).json({ error: 'Invalid email or password' });
+    return;
+  }
+
+  const token = 'tok_' + crypto.randomBytes(24).toString('hex');
+  store.sessions[token] = user.id;
+  saveStore(store);
+
+  res.json({
+    token,
+    user: {
+      id: user.id,
+      email: user.email,
+      name: user.name,
+      avatar: user.avatar,
+      createdAt: user.createdAt
+    }
+  });
+});
+
+app.get('/api/auth/me', (req: Request, res: Response) => {
+  const user = getAuthUser(req);
+  if (!user) {
+    res.status(401).json({ error: 'Not authenticated' });
+    return;
+  }
+  res.json({
+    user: {
+      id: user.id,
+      email: user.email,
+      name: user.name,
+      avatar: user.avatar,
+      createdAt: user.createdAt
+    }
+  });
+});
+
+app.post('/api/auth/logout', (req: Request, res: Response) => {
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    const token = authHeader.split(' ')[1];
+    delete store.sessions[token];
+    saveStore(store);
+  }
+  res.json({ success: true });
+});
+
+// --- REST API FOR PROJECTS (Google Drive Style) ---
+
 app.get('/api/projects', (req: Request, res: Response) => {
-  res.json({ snippets: store.snippets, folders: store.folders });
+  const user = getAuthUser(req);
+  if (!user) {
+    res.status(401).json({ 
+      error: 'ACCOUNT_REQUIRED',
+      message: 'You must make an account or sign in to access projects.' 
+    });
+    return;
+  }
+
+  // Filter projects belonging strictly to this user
+  const userSnippets = store.snippets.filter(s => s.userId === user.id);
+  res.json({ snippets: userSnippets, folders: store.folders });
 });
 
 app.get('/api/projects/:id', (req: Request, res: Response) => {
@@ -155,11 +297,22 @@ app.get('/api/projects/:id', (req: Request, res: Response) => {
   res.json(item);
 });
 
+// Create project - REQUIRES USER ACCOUNT TO SAVE
 app.post('/api/projects', (req: Request, res: Response) => {
+  const user = getAuthUser(req);
+  if (!user) {
+    res.status(401).json({ 
+      error: 'ACCOUNT_REQUIRED',
+      message: 'You must make an account or sign in to have your projects saved.' 
+    });
+    return;
+  }
+
   const body = req.body;
   const title = body.title || 'Untitled Project';
   const slug = body.slug || slugify(title);
 
+  // NO CODE in the codebox when creating new projects as requested!
   const newSnippet: Snippet = {
     id: body.id || 'snip_' + Math.random().toString(36).substring(2, 9),
     slug,
@@ -167,10 +320,11 @@ app.post('/api/projects', (req: Request, res: Response) => {
     description: body.description || '',
     language: body.language || 'web',
     folderId: body.folderId || store.folders[0]?.id || 'f_web',
-    html: body.html || '',
-    css: body.css || '',
-    js: body.js || '',
-    code: body.code || '',
+    userId: user.id,
+    html: body.html ?? '',
+    css: body.css ?? '',
+    js: body.js ?? '',
+    code: body.code ?? '',
     filename: body.filename || undefined,
     filesize: body.filesize || (body.code?.length || body.html?.length || 0),
     tags: Array.isArray(body.tags) ? body.tags : [],
@@ -185,17 +339,29 @@ app.post('/api/projects', (req: Request, res: Response) => {
   res.status(201).json(newSnippet);
 });
 
+// Update project - REQUIRES USER ACCOUNT
 app.put('/api/projects/:id', (req: Request, res: Response) => {
+  const user = getAuthUser(req);
+  if (!user) {
+    res.status(401).json({ 
+      error: 'ACCOUNT_REQUIRED',
+      message: 'You must make an account or sign in to have your projects saved.' 
+    });
+    return;
+  }
+
   const index = store.snippets.findIndex(s => s.id === req.params.id || s.slug === req.params.id);
   if (index === -1) {
     res.status(404).json({ error: 'Project not found' });
     return;
   }
+
   const existing = store.snippets[index];
   const updated: Snippet = {
     ...existing,
     ...req.body,
     id: existing.id,
+    userId: existing.userId || user.id,
     updatedAt: new Date().toISOString(),
     version: (existing.version || 1) + 1
   };
@@ -204,10 +370,29 @@ app.put('/api/projects/:id', (req: Request, res: Response) => {
   res.json(updated);
 });
 
+// Delete project
 app.delete('/api/projects/:id', (req: Request, res: Response) => {
+  const user = getAuthUser(req);
+  if (!user) {
+    res.status(401).json({ error: 'Authentication required' });
+    return;
+  }
   store.snippets = store.snippets.filter(s => s.id !== req.params.id && s.slug !== req.params.id);
   saveStore(store);
   res.json({ success: true, id: req.params.id });
+});
+
+// Reset user's projects
+app.post('/api/reset', (req: Request, res: Response) => {
+  const user = getAuthUser(req);
+  if (user) {
+    store.snippets = store.snippets.filter(s => s.userId !== user.id);
+  } else {
+    store.snippets = [];
+  }
+  store.shares = {};
+  saveStore(store);
+  res.json({ success: true, message: 'All snippets and shares cleared' });
 });
 
 // Folders
@@ -216,6 +401,7 @@ app.get('/api/folders', (req: Request, res: Response) => {
 });
 
 app.post('/api/folders', (req: Request, res: Response) => {
+  const user = getAuthUser(req);
   const { name, color } = req.body;
   if (!name) {
     res.status(400).json({ error: 'Folder name is required' });
@@ -224,7 +410,8 @@ app.post('/api/folders', (req: Request, res: Response) => {
   const newFolder: Folder = {
     id: 'f_' + Math.random().toString(36).substring(2, 8),
     name: name.trim(),
-    color: color || '#6366F1',
+    color: color || '#4285F4',
+    userId: user?.id,
     createdAt: new Date().toISOString()
   };
   store.folders.push(newFolder);
@@ -232,38 +419,11 @@ app.post('/api/folders', (req: Request, res: Response) => {
   res.status(201).json(newFolder);
 });
 
-app.put('/api/folders/:id', (req: Request, res: Response) => {
-  const folder = store.folders.find(f => f.id === req.params.id);
-  if (!folder) {
-    res.status(404).json({ error: 'Folder not found' });
-    return;
-  }
-  if (req.body.name) folder.name = req.body.name.trim();
-  if (req.body.color) folder.color = req.body.color;
-  saveStore(store);
-  res.json(folder);
-});
-
-app.delete('/api/folders/:id', (req: Request, res: Response) => {
-  if (store.folders.length <= 1) {
-    res.status(400).json({ error: 'Cannot delete the only folder' });
-    return;
-  }
-  const folderId = req.params.id;
-  store.folders = store.folders.filter(f => f.id !== folderId);
-  const fallback = store.folders[0].id;
-  store.snippets.forEach(s => {
-    if (s.folderId === folderId) s.folderId = fallback;
-  });
-  saveStore(store);
-  res.json({ success: true });
-});
-
 // Share with Clean Human-Readable Slugs
 app.post('/api/share', (req: Request, res: Response) => {
+  const user = getAuthUser(req);
   const body = req.body;
   const baseSlug = slugify(body.title || 'project');
-  // Check if unique or add short hash
   let shareId = baseSlug;
   if (store.shares[shareId] && store.shares[shareId].projectId !== body.projectId) {
     shareId = `${baseSlug}-${Math.random().toString(36).substring(2, 6)}`;
@@ -281,7 +441,7 @@ app.post('/api/share', (req: Request, res: Response) => {
     js: body.js || '',
     code: body.code || '',
     filename: body.filename || undefined,
-    author: body.author || 'rishi.p1.goyal',
+    author: user?.name || body.author || 'Anonymous',
     createdAt: new Date().toISOString(),
     views: 1
   };
@@ -326,7 +486,7 @@ You provide clear, direct, and actionable advice on:
 1. What to build or improve next.
 2. How to implement features step-by-step with practical, modern HTML, CSS, JavaScript, or Python code.
 3. Architecture improvements, UI design polishes, and bug fixes.
-Always provide concrete code snippets and concise explanations. Focus on high quality, anti-bloat code.`;
+Always provide concrete code snippets and concise explanations. Focus on high quality, clean code.`;
 
   try {
     if (aiClient) {
@@ -360,18 +520,10 @@ Give concise suggestions:
   // Graceful intelligent fallback if API key is in setup or offline
   const fallback = `### Recommendations for "${title || 'Project'}" (${language.toUpperCase()})
 
-1. **Enhance User Interaction**:
-   - Add responsive touch feedback and keyboard shortcuts (e.g. Enter to submit, Escape to dismiss).
-   - For web apps, add smooth transitions with CSS \`transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1)\`.
-
-2. **Persistence Layer**:
-   - Save user inputs to \`localStorage\` so state persists when page refreshes:
-   \`\`\`javascript
-   localStorage.setItem('saved_state', JSON.stringify(data));
-   \`\`\`
-
-3. **Performance & Clean Code**:
-   - Debounce expensive operations and handle boundary edge cases.`;
+1. **Blank Canvas Architecture**:
+   - Start by defining the HTML DOM layout structure with semantic tags.
+   - Add styling for fluid layout and dark mode theme.
+   - Add JavaScript event listeners to handle user inputs.`;
 
   res.json({ suggestion: fallback });
 });
@@ -387,7 +539,7 @@ app.get('/live/:shareId', (req: Request, res: Response) => {
         <body style="background:#0d1117; color:#8b949e; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif; display:flex; flex-direction:column; align-items:center; justify-content:center; height:100vh; margin:0;">
           <h1 style="color:#f0f6fc; margin-bottom:8px;">Project Not Found</h1>
           <p>The link might have expired or the slug is invalid.</p>
-          <a href="/" style="margin-top:16px; color:#58a6ff; text-decoration:none; font-weight:600;">← Back to GitHub Dashboard</a>
+          <a href="/" style="margin-top:16px; color:#58a6ff; text-decoration:none; font-weight:600;">← Back to Code Drive</a>
         </body>
       </html>
     `);
@@ -403,9 +555,9 @@ app.get('/live/:shareId', (req: Request, res: Response) => {
 
   const badgeHtml = `
     <div style="position:fixed; bottom:16px; right:16px; z-index:999999; display:flex; align-items:center; gap:8px; background:rgba(22,27,34,0.92); border:1px solid #30363d; padding:6px 14px; border-radius:9999px; backdrop-filter:blur(10px); font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; font-size:12px; color:#8b949e; box-shadow:0 10px 25px rgba(0,0,0,0.5);">
-      <span>Hosted on <strong style="color:#f0f6fc;">CodeForge</strong></span>
+      <span>Hosted on <strong style="color:#f0f6fc;">CodeDrive</strong></span>
       <span>·</span>
-      <a href="/?share=${shared.shareId}" target="_blank" style="color:#58a6ff; text-decoration:none; font-weight:600;">Fork Code ↗</a>
+      <a href="/?share=${shared.shareId}" target="_blank" style="color:#58a6ff; text-decoration:none; font-weight:600;">Open Code ↗</a>
     </div>
   `;
 
@@ -415,7 +567,7 @@ app.get('/live/:shareId', (req: Request, res: Response) => {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>${safeTitle} · CodeForge Live</title>
+  <title>${safeTitle} · CodeDrive Live</title>
   <style>
     ${shared.css || ''}
   </style>
@@ -521,7 +673,7 @@ app.get('/live/:shareId', (req: Request, res: Response) => {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>${safeTitle} · CodeForge</title>
+  <title>${safeTitle} · CodeDrive</title>
   <style>
     * { margin:0; padding:0; box-sizing:border-box; }
     body { background:#0d1117; color:#c9d1d9; font-family:'JetBrains Mono', monospace; padding:24px; min-height:100vh; }
@@ -570,7 +722,7 @@ async function startServer() {
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`CodeForge Server active on http://0.0.0.0:${PORT}`);
+    console.log(`CodeDrive Server active on http://0.0.0.0:${PORT}`);
   });
 }
 

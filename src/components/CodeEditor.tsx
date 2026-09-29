@@ -289,11 +289,12 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
             onKeyDown={handleKeyDown}
             onKeyUp={updateCursorPosition}
             onClick={updateCursorPosition}
+            placeholder={`// Blank codebox - write your ${isWeb ? activeTab.toUpperCase() : language} code here...`}
             spellCheck={false}
             autoCapitalize="off"
             autoComplete="off"
             autoCorrect="off"
-            className="absolute inset-0 w-full h-full p-3 m-0 bg-transparent text-transparent caret-white resize-none outline-none border-none whitespace-pre break-normal overflow-auto code-editor-layer"
+            className="absolute inset-0 w-full h-full p-3 m-0 bg-transparent text-transparent caret-white resize-none outline-none border-none whitespace-pre break-normal overflow-auto code-editor-layer placeholder:text-neutral-600"
             style={{ fontSize: `${fontSize}px`, lineHeight: '21px' }}
           />
         </div>

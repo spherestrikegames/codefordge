@@ -16,6 +16,14 @@ export type SupportedLanguage =
   | 'sql' 
   | 'plaintext';
 
+export interface User {
+  id: string;
+  email: string;
+  name: string;
+  avatar?: string;
+  createdAt: string;
+}
+
 export interface Snippet {
   id: string;
   slug: string;
@@ -23,6 +31,7 @@ export interface Snippet {
   description: string;
   language: SupportedLanguage;
   folderId: string;
+  userId?: string;
   // For web projects: html, css, js
   html: string;
   css: string;

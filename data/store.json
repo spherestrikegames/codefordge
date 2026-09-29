@@ -1,22 +1,24 @@
 {
+  "users": [],
+  "sessions": {},
   "folders": [
     {
       "id": "f_web",
-      "name": "Web Applications",
-      "color": "#EC4899",
-      "createdAt": "2026-09-29T01:20:00.000Z"
+      "name": "Web Apps",
+      "color": "#EA4335",
+      "createdAt": "2026-09-29T01:30:00.000Z"
     },
     {
       "id": "f_python",
       "name": "Python Scripts",
-      "color": "#10B981",
-      "createdAt": "2026-09-29T01:20:00.000Z"
+      "color": "#34A853",
+      "createdAt": "2026-09-29T01:30:00.000Z"
     },
     {
       "id": "f_tools",
-      "name": "Developer Tools",
-      "color": "#6366F1",
-      "createdAt": "2026-09-29T01:20:00.000Z"
+      "name": "Utilities",
+      "color": "#4285F4",
+      "createdAt": "2026-09-29T01:30:00.000Z"
     }
   ],
   "snippets": [],

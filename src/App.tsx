@@ -2,12 +2,22 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Header } from './components/Header';
 import { CodeEditor } from './components/CodeEditor';
 import { PreviewPanel } from './components/PreviewPanel';
-import { GithubDashboard } from './components/GithubDashboard';
+import { GoogleDriveDashboard } from './components/GoogleDriveDashboard';
 import { AiCopilotAgent } from './components/AiCopilotAgent';
 import { UploadModal } from './components/UploadModal';
 import { ShareModal } from './components/ShareModal';
-import { Snippet, Folder, SharedProject, UploadedFileResult, SupportedLanguage } from './types';
-import { Code2, Monitor, Sparkles, X } from 'lucide-react';
+import { AuthModal } from './components/AuthModal';
+import { AuthGate } from './components/AuthGate';
+import { SupabaseModal } from './components/SupabaseModal';
+import { Snippet, Folder, SharedProject, UploadedFileResult, SupportedLanguage, User } from './types';
+import { 
+  getSupabaseClient, 
+  mapSupabaseUser, 
+  fetchProjectsFromSupabase, 
+  upsertProjectToSupabase, 
+  isSupabaseConfigured 
+} from './lib/supabase';
+import { Code2, Monitor, Sparkles, X, Lock } from 'lucide-react';
 
 function slugify(text: string): string {
   return text
@@ -19,6 +29,11 @@ function slugify(text: string): string {
 }
 
 export default function App() {
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [authToken, setAuthToken] = useState<string | null>(localStorage.getItem('code_auth_token'));
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+  const [isSupabaseModalOpen, setIsSupabaseModalOpen] = useState(false);
+
   const [snippets, setSnippets] = useState<Snippet[]>([]);
   const [folders, setFolders] = useState<Folder[]>([]);
   const [currentSnippet, setCurrentSnippet] = useState<Snippet | null>(null);
@@ -35,105 +50,169 @@ export default function App() {
   const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [editorSplitRatio, setEditorSplitRatio] = useState(50);
+  const [authNotice, setAuthNotice] = useState<string | null>(null);
 
-  // Toggle dark mode class
+  // Check auth session on mount (Local Server + Supabase GitHub OAuth)
   useEffect(() => {
-    if (darkMode) {
-      document.documentElement.classList.remove('light');
-    } else {
-      document.documentElement.classList.add('light');
-    }
-  }, [darkMode]);
-
-  // Load initial data
-  useEffect(() => {
-    async function loadData() {
-      try {
-        const res = await fetch('/api/projects');
-        if (res.ok) {
-          const data = await res.json();
-          setSnippets(data.snippets || []);
-          setFolders(data.folders || []);
-
-          // Check URL query parameters
-          const params = new URLSearchParams(window.location.search);
-          const shareId = params.get('share');
-          const projectId = params.get('project');
-
-          if (shareId) {
-            try {
-              const sRes = await fetch(`/api/share/${shareId}`);
-              if (sRes.ok) {
-                const sData: SharedProject = await sRes.json();
-                const forked: Snippet = {
-                  id: 'snip_' + Math.random().toString(36).substring(2, 9),
-                  slug: slugify(sData.title) + '-forked',
-                  title: `${sData.title} (Forked)`,
-                  description: sData.description || '',
-                  language: sData.language || 'web',
-                  folderId: data.folders[0]?.id || 'f_web',
-                  html: sData.html || '',
-                  css: sData.css || '',
-                  js: sData.js || '',
-                  code: sData.code || '',
-                  filename: sData.filename || undefined,
-                  tags: ['forked', 'shared'],
-                  isFavorite: false,
-                  createdAt: new Date().toISOString(),
-                  updatedAt: new Date().toISOString(),
-                  version: 1
-                };
-                setCurrentSnippet(forked);
-                setSnippets(prev => [forked, ...prev]);
-                setViewMode('playground');
-                return;
-              }
-            } catch (err) {
-              console.error('Failed to load shared snippet:', err);
-            }
+    async function checkAuth() {
+      // 1. Check local server auth token
+      const token = localStorage.getItem('code_auth_token');
+      if (token) {
+        try {
+          const res = await fetch('/api/auth/me', {
+            headers: { Authorization: `Bearer ${token}` }
+          });
+          if (res.ok) {
+            const data = await res.json();
+            setCurrentUser(data.user);
+            setAuthToken(token);
+          } else {
+            localStorage.removeItem('code_auth_token');
+            setAuthToken(null);
           }
-
-          if (projectId) {
-            const found = data.snippets.find((s: Snippet) => s.id === projectId || s.slug === projectId);
-            if (found) {
-              setCurrentSnippet(found);
-              setViewMode('playground');
-              return;
-            }
-          }
-
-          if (data.snippets && data.snippets.length > 0) {
-            setCurrentSnippet(data.snippets[0]);
-          }
+        } catch (err) {
+          console.error('Auth verification error:', err);
         }
-      } catch (err) {
-        console.error('Failed to fetch projects:', err);
+      }
+
+      // 2. Check Supabase Auth (e.g. GitHub OAuth login)
+      const sb = getSupabaseClient();
+      if (sb) {
+        try {
+          const { data: { session } } = await sb.auth.getSession();
+          if (session?.user) {
+            const mapped = mapSupabaseUser(session.user);
+            setCurrentUser(mapped);
+          }
+
+          sb.auth.onAuthStateChange((_event, session) => {
+            if (session?.user) {
+              const mapped = mapSupabaseUser(session.user);
+              setCurrentUser(mapped);
+            }
+          });
+        } catch (err) {
+          console.warn('Supabase session check notice:', err);
+        }
       }
     }
-    loadData();
+    checkAuth();
   }, []);
 
-  // Debounced auto-save
+  // Load user data whenever auth state changes
+  const loadProjects = useCallback(async () => {
+    try {
+      const headers: Record<string, string> = {};
+      const token = localStorage.getItem('code_auth_token');
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+
+      const res = await fetch('/api/projects', { headers });
+      if (res.ok) {
+        const data = await res.json();
+        let loadedSnippets: Snippet[] = data.snippets || [];
+
+        // If Supabase is configured, also fetch from Supabase projects
+        if (isSupabaseConfigured() && currentUser) {
+          const sbSnippets = await fetchProjectsFromSupabase(currentUser.id);
+          if (sbSnippets.length > 0) {
+            // merge without duplicates
+            const existingIds = new Set(loadedSnippets.map(s => s.id));
+            const newFromSb = sbSnippets.filter(s => !existingIds.has(s.id));
+            loadedSnippets = [...loadedSnippets, ...newFromSb];
+          }
+        }
+
+        setSnippets(loadedSnippets);
+        setFolders(data.folders || []);
+
+        if (loadedSnippets.length > 0 && !currentSnippet) {
+          setCurrentSnippet(loadedSnippets[0]);
+        }
+      }
+    } catch (err) {
+      console.error('Failed to fetch projects:', err);
+    }
+  }, [currentSnippet, currentUser]);
+
+  useEffect(() => {
+    loadProjects();
+  }, [currentUser, loadProjects]);
+
+  // Handle URL share params
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const shareId = params.get('share');
+    if (shareId) {
+      fetch(`/api/share/${shareId}`)
+        .then(r => r.json())
+        .then((sData: SharedProject) => {
+          if (sData && sData.title) {
+            const forked: Snippet = {
+              id: 'snip_' + Math.random().toString(36).substring(2, 9),
+              slug: slugify(sData.title) + '-forked',
+              title: `${sData.title} (Forked)`,
+              description: sData.description || '',
+              language: sData.language || 'web',
+              folderId: folders[0]?.id || 'f_web',
+              html: sData.html || '',
+              css: sData.css || '',
+              js: sData.js || '',
+              code: sData.code || '',
+              filename: sData.filename || undefined,
+              tags: ['forked', 'shared'],
+              isFavorite: false,
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+              version: 1
+            };
+            setCurrentSnippet(forked);
+            setSnippets(prev => [forked, ...prev]);
+            setViewMode('playground');
+          }
+        })
+        .catch(err => console.error('Share link load error:', err));
+    }
+  }, [folders]);
+
+  // Debounced auto-save (requires authentication)
   const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   const triggerSave = useCallback((snippetToSave: Snippet) => {
+    if (!currentUser) {
+      setAuthNotice('You must make an account or sign in with GitHub to have your projects saved.');
+      return;
+    }
+
     setIsSaving(true);
+    setAuthNotice(null);
     if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
 
     saveTimeoutRef.current = setTimeout(async () => {
       try {
+        const headers: Record<string, string> = {
+          'Content-Type': 'application/json'
+        };
+        if (authToken) {
+          headers['Authorization'] = `Bearer ${authToken}`;
+        }
+
         const res = await fetch(`/api/projects/${snippetToSave.id}`, {
           method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
+          headers,
           body: JSON.stringify(snippetToSave)
         });
 
         if (!res.ok) {
           await fetch('/api/projects', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers,
             body: JSON.stringify(snippetToSave)
           });
+        }
+
+        // Also sync to Supabase if connected
+        if (isSupabaseConfigured() && currentUser) {
+          upsertProjectToSupabase(snippetToSave, currentUser.id);
         }
 
         setSnippets(prev => prev.map(s => s.id === snippetToSave.id ? snippetToSave : s));
@@ -143,7 +222,7 @@ export default function App() {
         setIsSaving(false);
       }
     }, 500);
-  }, []);
+  }, [currentUser, authToken]);
 
   // Code change in editor
   const handleCodeChange = (newCode: string) => {
@@ -185,19 +264,24 @@ export default function App() {
       }
       if ((e.ctrlKey || e.metaKey) && e.key === 's') {
         e.preventDefault();
-        if (currentSnippet) triggerSave(currentSnippet);
+        if (currentSnippet) {
+          if (!currentUser) {
+            setIsAuthModalOpen(true);
+          } else {
+            triggerSave(currentSnippet);
+          }
+        }
       }
     };
     window.addEventListener('keydown', handleGlobalKeys);
     return () => window.removeEventListener('keydown', handleGlobalKeys);
-  }, [currentSnippet, triggerSave]);
+  }, [currentSnippet, currentUser, triggerSave]);
 
   // Apply code from AI Copilot
   const handleApplyAiCode = (codeSnippet: string) => {
     if (!currentSnippet) return;
 
     if (currentSnippet.language === 'web' || currentSnippet.language === 'html') {
-      // If code contains HTML tags, apply to html; if css syntax, apply to css; else js
       let targetTab = activeEditorTab;
       if (codeSnippet.includes('<div') || codeSnippet.includes('<button') || codeSnippet.includes('<h1')) {
         targetTab = 'html';
@@ -227,25 +311,31 @@ export default function App() {
     setRunTrigger(r => r + 1);
   };
 
-  // Create new snippet
+  // Create new snippet - BLANK CODEBOX AS REQUESTED!
   const handleCreateNewSnippet = async (folderId?: string, lang: SupportedLanguage = 'web') => {
+    if (!currentUser) {
+      setIsAuthModalOpen(true);
+      return;
+    }
+
     const targetFolderId = folderId || (folders[0] ? folders[0].id : 'f_web');
     const isWeb = lang === 'web' || lang === 'html';
-    const title = isWeb ? 'Interactive Web App' : 'Python Script';
+    const title = isWeb ? 'Untitled Web App' : 'Untitled Python Script';
     const slug = slugify(title) + '-' + Math.random().toString(36).substring(2, 6);
 
+    // Completely BLANK codebox: no prefilled code!
     const newSnippet: Snippet = {
       id: 'snip_' + Math.random().toString(36).substring(2, 9),
       slug,
       title,
-      description: isWeb ? 'HTML, CSS & JavaScript application.' : 'Python 3 script.',
+      description: '',
       language: lang,
       folderId: targetFolderId,
       filename: isWeb ? 'index.html' : 'main.py',
-      html: isWeb ? `<div class="container">\n  <h1>Hello, CodeForge!</h1>\n  <p>Build with HTML, CSS & JavaScript in real-time.</p>\n  <button id="actionBtn">Click to Interact</button>\n</div>` : '',
-      css: isWeb ? `body {\n  margin: 0;\n  background: #0d1117;\n  color: #f0f6fc;\n  font-family: -apple-system, sans-serif;\n  display: flex;\n  align-items: center;\n  justify-content: center;\n  min-height: 100vh;\n}\n.container {\n  text-align: center;\n  padding: 32px;\n  background: #161b22;\n  border: 1px solid #30363d;\n  border-radius: 12px;\n}\nbutton {\n  background: #238636;\n  color: white;\n  border: none;\n  padding: 10px 20px;\n  border-radius: 6px;\n  font-weight: 600;\n  cursor: pointer;\n}` : '',
-      js: isWeb ? `const btn = document.getElementById('actionBtn');\nbtn.addEventListener('click', () => {\n  console.log('Button clicked!');\n  btn.textContent = 'Awesome! Clicked!';\n  btn.style.background = '#1f6feb';\n});\nconsole.log('Interactive web application mounted.');` : '',
-      code: !isWeb ? `def main():\n    print("Hello from Python 3!")\n    numbers = [1, 2, 3, 4, 5]\n    print("Sum of numbers:", sum(numbers))\n\nmain()\n` : '',
+      html: '',
+      css: '',
+      js: '',
+      code: '',
       tags: [lang],
       isFavorite: false,
       createdAt: new Date().toISOString(),
@@ -254,9 +344,12 @@ export default function App() {
     };
 
     try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
+
       const res = await fetch('/api/projects', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify(newSnippet)
       });
       if (res.ok) {
@@ -272,18 +365,28 @@ export default function App() {
       setCurrentSnippet(newSnippet);
     }
 
+    // Sync to Supabase
+    if (isSupabaseConfigured() && currentUser) {
+      upsertProjectToSupabase(newSnippet, currentUser.id);
+    }
+
     setViewMode('playground');
     setRunTrigger(r => r + 1);
   };
 
   // Upload handler
   const handleUploadSuccess = async (fileData: UploadedFileResult & { title: string; folderId: string }) => {
+    if (!currentUser) {
+      setIsAuthModalOpen(true);
+      return;
+    }
+
     const slug = slugify(fileData.title);
     const newSnippet: Snippet = {
       id: 'snip_' + Math.random().toString(36).substring(2, 9),
       slug,
       title: fileData.title,
-      description: `Imported from ${fileData.filename}`,
+      description: `Uploaded from ${fileData.filename}`,
       language: fileData.language,
       folderId: fileData.folderId,
       filename: fileData.filename,
@@ -300,9 +403,12 @@ export default function App() {
     };
 
     try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
+
       const res = await fetch('/api/projects', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify(newSnippet)
       });
       if (res.ok) {
@@ -318,11 +424,20 @@ export default function App() {
       setCurrentSnippet(newSnippet);
     }
 
+    if (isSupabaseConfigured() && currentUser) {
+      upsertProjectToSupabase(newSnippet, currentUser.id);
+    }
+
     setViewMode('playground');
     setRunTrigger(r => r + 1);
   };
 
   const handleDuplicateSnippet = async (snip: Snippet) => {
+    if (!currentUser) {
+      setIsAuthModalOpen(true);
+      return;
+    }
+
     const duplicated: Snippet = {
       ...snip,
       id: 'snip_' + Math.random().toString(36).substring(2, 9),
@@ -334,12 +449,19 @@ export default function App() {
     };
 
     try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
+
       await fetch('/api/projects', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify(duplicated)
       });
       setSnippets(prev => [duplicated, ...prev]);
+
+      if (isSupabaseConfigured() && currentUser) {
+        upsertProjectToSupabase(duplicated, currentUser.id);
+      }
     } catch (err) {
       console.error('Error duplicating snippet:', err);
     }
@@ -347,11 +469,17 @@ export default function App() {
 
   const handleDeleteSnippet = async (id: string) => {
     try {
-      await fetch(`/api/projects/${id}`, { method: 'DELETE' });
+      const headers = authToken ? { 'Authorization': `Bearer ${authToken}` } : undefined;
+      await fetch(`/api/projects/${id}`, { method: 'DELETE', headers });
       const nextSnippets = snippets.filter(s => s.id !== id && s.slug !== id);
       setSnippets(nextSnippets);
       if (currentSnippet?.id === id || currentSnippet?.slug === id) {
         setCurrentSnippet(nextSnippets[0] || null);
+      }
+
+      if (isSupabaseConfigured()) {
+        const sb = getSupabaseClient();
+        sb?.from('projects').delete().eq('id', id);
       }
     } catch (err) {
       console.error('Delete snippet error:', err);
@@ -363,14 +491,21 @@ export default function App() {
     if (!target) return;
     const updated = { ...target, isFavorite: !target.isFavorite };
     try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
+
       await fetch(`/api/projects/${target.id}`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({ isFavorite: updated.isFavorite })
       });
       setSnippets(prev => prev.map(s => (s.id === target.id) ? updated : s));
       if (currentSnippet?.id === target.id) {
         setCurrentSnippet(updated);
+      }
+
+      if (isSupabaseConfigured() && currentUser) {
+        upsertProjectToSupabase(updated, currentUser.id);
       }
     } catch (err) {
       console.error('Toggle favorite error:', err);
@@ -379,9 +514,12 @@ export default function App() {
 
   const handleCreateFolder = async (name: string, color: string) => {
     try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
+
       const res = await fetch('/api/folders', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({ name, color })
       });
       if (res.ok) {
@@ -406,14 +544,39 @@ export default function App() {
   const handleClearAllProjects = async () => {
     if (confirm('Are you sure you want to get rid of all projects? This will clear all snippets and live links.')) {
       try {
-        await fetch('/api/reset', { method: 'POST' });
+        const headers = authToken ? { 'Authorization': `Bearer ${authToken}` } : undefined;
+        await fetch('/api/reset', { method: 'POST', headers });
         setSnippets([]);
         setCurrentSnippet(null);
         setViewMode('dashboard');
+
+        if (isSupabaseConfigured() && currentUser) {
+          const sb = getSupabaseClient();
+          sb?.from('projects').delete().eq('user_id', currentUser.id);
+        }
       } catch (err) {
         console.error('Failed to reset:', err);
       }
     }
+  };
+
+  const handleLogout = async () => {
+    try {
+      if (authToken) {
+        await fetch('/api/auth/logout', {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${authToken}` }
+        });
+      }
+      const sb = getSupabaseClient();
+      sb?.auth.signOut();
+    } catch {}
+    localStorage.removeItem('code_auth_token');
+    setAuthToken(null);
+    setCurrentUser(null);
+    setSnippets([]);
+    setCurrentSnippet(null);
+    setViewMode('dashboard');
   };
 
   const getCurrentCode = () => {
@@ -428,10 +591,35 @@ export default function App() {
     ? `${window.location.origin}/live/${currentSnippet.slug || currentSnippet.id}`
     : '';
 
+  // Strict Account Requirement: you cannot do anything without an account
+  if (!currentUser) {
+    return (
+      <div className="h-screen w-screen bg-[#14161a]">
+        <AuthGate
+          onSuccess={(user, token) => {
+            setCurrentUser(user);
+            setAuthToken(token);
+            setAuthNotice(null);
+            loadProjects();
+          }}
+          onOpenSupabaseModal={() => setIsSupabaseModalOpen(true)}
+        />
+        <SupabaseModal
+          isOpen={isSupabaseModalOpen}
+          onClose={() => setIsSupabaseModalOpen(false)}
+          onCredentialsUpdated={() => {
+            loadProjects();
+          }}
+        />
+      </div>
+    );
+  }
+
   return (
-    <div className="flex flex-col h-screen w-screen overflow-hidden bg-[#0d1117] font-sans text-[#c9d1d9] select-none">
+    <div className="flex flex-col h-screen w-screen overflow-hidden bg-[#181a1f] font-sans text-[#e3e3e3] select-none">
       <Header
         currentSnippet={currentSnippet}
+        currentUser={currentUser}
         onUpdateTitle={(title) => {
           if (currentSnippet) {
             const updated = { ...currentSnippet, title, slug: slugify(title), updatedAt: new Date().toISOString() };
@@ -442,6 +630,8 @@ export default function App() {
         onRunCode={handleRunCode}
         onOpenShareModal={() => setIsShareModalOpen(true)}
         onOpenUploadModal={() => setIsUploadModalOpen(true)}
+        onOpenAuthModal={() => setIsAuthModalOpen(true)}
+        onLogout={handleLogout}
         onNewSnippet={handleCreateNewSnippet}
         onToggleAiAgent={() => setIsAiAgentOpen(!isAiAgentOpen)}
         isAiAgentOpen={isAiAgentOpen}
@@ -453,32 +643,48 @@ export default function App() {
         snippetsCount={snippets.length}
       />
 
+      {/* Guest Account Banner Notice */}
+      {authNotice && (
+        <div className="bg-amber-500/15 border-b border-amber-500/30 px-4 py-2 flex items-center justify-between text-xs text-amber-200">
+          <div className="flex items-center gap-2">
+            <Lock className="w-3.5 h-3.5 text-amber-400" />
+            <span>{authNotice}</span>
+          </div>
+          <button
+            onClick={() => setIsAuthModalOpen(true)}
+            className="px-2.5 py-1 rounded bg-amber-400 hover:bg-amber-300 text-neutral-950 font-bold text-[11px] transition-colors"
+          >
+            Create Account / Sign In with GitHub
+          </button>
+        </div>
+      )}
+
       <div className="flex-1 flex overflow-hidden relative">
         {viewMode === 'playground' && !currentSnippet && (
-          <div className="flex-1 flex flex-col items-center justify-center p-8 text-center bg-[#0d1117]">
-            <div className="w-12 h-12 rounded-xl bg-[#161b22] border border-[#30363d] flex items-center justify-center text-[#8b949e] mb-3">
-              <Code2 className="w-6 h-6 stroke-[1.5]" />
+          <div className="flex-1 flex flex-col items-center justify-center p-8 text-center bg-[#181a1f]">
+            <div className="w-14 h-14 rounded-2xl bg-[#282a30] border border-[#3c4049] flex items-center justify-center text-[#8ab4f8] mb-3">
+              <Code2 className="w-7 h-7 stroke-[1.5]" />
             </div>
-            <h3 className="text-base font-semibold text-[#f0f6fc]">No Active Project</h3>
-            <p className="text-xs text-[#8b949e] mt-1 max-w-sm">
-              All projects have been cleared. Create a new interactive Web App or Python project, or upload a code file.
+            <h3 className="text-base font-semibold text-white">No Project Open</h3>
+            <p className="text-xs text-[#9aa0a6] mt-1 max-w-sm">
+              Create a new blank project or upload files. The codebox opens completely clean with no code.
             </p>
             <div className="flex flex-wrap items-center justify-center gap-2 mt-4">
               <button
                 onClick={() => handleCreateNewSnippet(undefined, 'web')}
-                className="px-4 py-2 bg-[#238636] hover:bg-[#2ea043] text-white rounded-md text-xs font-semibold"
+                className="px-4 py-2 bg-[#8ab4f8] hover:bg-[#aecbfa] text-neutral-950 rounded-xl text-xs font-bold"
               >
-                + New Web Project (HTML &amp; JS)
+                + Blank Web App
               </button>
               <button
                 onClick={() => handleCreateNewSnippet(undefined, 'python')}
-                className="px-4 py-2 bg-[#21262d] hover:bg-[#30363d] text-[#c9d1d9] border border-[#30363d] rounded-md text-xs font-semibold"
+                className="px-4 py-2 bg-[#282a30] hover:bg-[#333741] text-white border border-[#3c4049] rounded-xl text-xs font-semibold"
               >
-                + New Python Script
+                + Blank Python Script
               </button>
               <button
                 onClick={() => setIsUploadModalOpen(true)}
-                className="px-4 py-2 bg-[#21262d] hover:bg-[#30363d] text-[#58a6ff] border border-[#30363d] rounded-md text-xs font-semibold"
+                className="px-4 py-2 bg-[#282a30] hover:bg-[#333741] text-[#c58af9] border border-[#3c4049] rounded-xl text-xs font-semibold"
               >
                 Upload Code File
               </button>
@@ -489,11 +695,11 @@ export default function App() {
         {viewMode === 'playground' && currentSnippet && (
           <div className="flex-1 flex flex-col md:flex-row h-full w-full overflow-hidden">
             {/* Mobile Switcher */}
-            <div className="md:hidden h-10 px-4 bg-[#161b22] border-b border-[#30363d] flex items-center justify-around shrink-0">
+            <div className="md:hidden h-10 px-4 bg-[#1e2025] border-b border-[#2d3139] flex items-center justify-around shrink-0">
               <button
                 onClick={() => setMobileView('editor')}
                 className={`flex items-center gap-1.5 text-xs font-semibold px-3 py-1 rounded-md ${
-                  mobileView === 'editor' ? 'bg-[#30363d] text-white' : 'text-[#8b949e]'
+                  mobileView === 'editor' ? 'bg-[#282a30] text-white' : 'text-[#9aa0a6]'
                 }`}
               >
                 <Code2 className="w-3.5 h-3.5" />
@@ -505,7 +711,7 @@ export default function App() {
                   handleRunCode();
                 }}
                 className={`flex items-center gap-1.5 text-xs font-semibold px-3 py-1 rounded-md ${
-                  mobileView === 'preview' ? 'bg-[#30363d] text-white' : 'text-[#8b949e]'
+                  mobileView === 'preview' ? 'bg-[#282a30] text-white' : 'text-[#9aa0a6]'
                 }`}
               >
                 <Monitor className="w-3.5 h-3.5" />
@@ -533,7 +739,7 @@ export default function App() {
 
             {/* Resizer */}
             <div
-              className="hidden md:flex w-1 hover:w-1.5 bg-[#30363d] hover:bg-[#58a6ff] cursor-col-resize items-center justify-center transition-all z-20"
+              className="hidden md:flex w-1 hover:w-1.5 bg-[#2d3139] hover:bg-[#8ab4f8] cursor-col-resize items-center justify-center transition-all z-20"
               onMouseDown={(e) => {
                 const handleMouseMove = (moveEvent: MouseEvent) => {
                   const newRatio = (moveEvent.clientX / window.innerWidth) * 100;
@@ -571,20 +777,20 @@ export default function App() {
 
             {/* Slide-out AI Copilot Agent Drawer */}
             {isAiAgentOpen && (
-              <div className="w-80 lg:w-96 h-full border-l border-[#30363d] bg-[#0d1117] flex flex-col z-30 animate-in slide-in-from-right duration-200">
-                <div className="h-10 px-3 bg-[#161b22] border-b border-[#30363d] flex items-center justify-between text-xs text-[#f0f6fc] font-semibold">
-                  <div className="flex items-center gap-1.5">
-                    <Sparkles className="w-3.5 h-3.5 text-[#58a6ff]" />
+              <div className="w-80 lg:w-96 h-full border-l border-[#2d3139] bg-[#1e2025] flex flex-col z-30 animate-in slide-in-from-right duration-200">
+                <div className="h-12 px-4 bg-[#14161a] border-b border-[#2d3139] flex items-center justify-between text-xs text-white font-semibold">
+                  <div className="flex items-center gap-2">
+                    <Sparkles className="w-4 h-4 text-[#fbbc04]" />
                     <span>AI Copilot Agent</span>
                   </div>
                   <button
                     onClick={() => setIsAiAgentOpen(false)}
-                    className="p-1 rounded text-[#8b949e] hover:text-white"
+                    className="p-1 rounded text-[#9aa0a6] hover:text-white"
                   >
                     <X className="w-4 h-4" />
                   </button>
                 </div>
-                <div className="flex-1 overflow-hidden">
+                <div className="flex-1 overflow-hidden p-2">
                   <AiCopilotAgent
                     currentSnippet={currentSnippet}
                     onApplyCode={handleApplyAiCode}
@@ -596,9 +802,10 @@ export default function App() {
         )}
 
         {viewMode === 'dashboard' && (
-          <GithubDashboard
+          <GoogleDriveDashboard
             snippets={snippets}
             folders={folders}
+            currentUser={currentUser}
             activeFolderId={activeFolderId}
             setActiveFolderId={setActiveFolderId}
             onSelectSnippet={(snip) => {
@@ -607,6 +814,8 @@ export default function App() {
             }}
             onCreateSnippet={handleCreateNewSnippet}
             onOpenUploadModal={() => setIsUploadModalOpen(true)}
+            onOpenAuthModal={() => setIsAuthModalOpen(true)}
+            onOpenSupabaseModal={() => setIsSupabaseModalOpen(true)}
             onDeleteSnippet={handleDeleteSnippet}
             onDuplicateSnippet={handleDuplicateSnippet}
             onToggleFavorite={handleToggleFavorite}
@@ -617,6 +826,28 @@ export default function App() {
           />
         )}
       </div>
+
+      {/* Auth Modal */}
+      <AuthModal
+        isOpen={isAuthModalOpen}
+        onClose={() => setIsAuthModalOpen(false)}
+        onOpenSupabaseModal={() => setIsSupabaseModalOpen(true)}
+        onSuccess={(user, token) => {
+          setCurrentUser(user);
+          setAuthToken(token);
+          setAuthNotice(null);
+          loadProjects();
+        }}
+      />
+
+      {/* Supabase & GitHub Configuration Modal */}
+      <SupabaseModal
+        isOpen={isSupabaseModalOpen}
+        onClose={() => setIsSupabaseModalOpen(false)}
+        onCredentialsUpdated={() => {
+          loadProjects();
+        }}
+      />
 
       {/* Share Modal */}
       <ShareModal

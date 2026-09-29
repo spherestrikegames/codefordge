@@ -1,0 +1,7 @@
+{
+  "name": "CodeForge - Live Code Runner & Project Sharing",
+  "description": "Run code in real-time, generate instant public web links to share your projects live, and organize snippets in customizable folders with a dark-mode dashboard.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+

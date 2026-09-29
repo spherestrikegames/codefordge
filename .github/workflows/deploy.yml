@@ -4,10 +4,15 @@ on:
   push:
     branches:
       - main
+      - master
   pull_request:
     branches:
       - main
+      - master
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build-and-test:
@@ -15,17 +20,16 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout Code
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: 'npm'
 
       - name: Install Dependencies
-        run: npm ci || npm install
+        run: npm install --legacy-peer-deps
 
       - name: Lint & Typecheck
         run: npm run lint
@@ -37,7 +41,7 @@ jobs:
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
 
-      - name: Upload Build Artifacts
+      - name: Archive Production Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: dist-artifacts
@@ -48,10 +52,10 @@ jobs:
     name: Deploy
     needs: build-and-test
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') && github.event_name == 'push'
 
     steps:
-      - name: Checkout Code
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
       - name: Download Build Artifacts
@@ -60,7 +64,7 @@ jobs:
           name: dist-artifacts
           path: dist
 
-      - name: Deployment Step
+      - name: Verify Distribution Output
         run: |
           echo "Build completed successfully."
-          echo "Ready for deployment to production host / Cloud Run / Supabase / Vercel."
+          ls -la dist/

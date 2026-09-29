@@ -191,7 +191,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         </div>
 
         {/* Form Body */}
-        <form onSubmit={handleSubmit} className="p-6 space-y-4 pt-4">
+        <form noValidate onSubmit={handleSubmit} className="p-6 space-y-4 pt-4">
           {errorMsg && (
             <div className="p-3 rounded-lg bg-red-950/60 border border-red-800 text-xs text-red-200">
               {errorMsg}

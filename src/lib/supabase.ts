@@ -18,10 +18,33 @@ export function getSupabaseCredentials(): { url: string; key: string } {
   };
 }
 
+export function normalizeSupabaseUrl(rawUrl: string): string {
+  let cleaned = (rawUrl || '').trim().replace(/^['"]|['"]$/g, '');
+  if (!cleaned) return '';
+  if (!cleaned.startsWith('http://') && !cleaned.startsWith('https://')) {
+    cleaned = 'https://' + cleaned;
+  }
+  // Remove trailing slashes
+  cleaned = cleaned.replace(/\/+$/, '');
+  return cleaned;
+}
+
+export function normalizeSupabaseKey(rawKey: string): string {
+  return (rawKey || '').trim().replace(/^['"]|['"]$/g, '');
+}
+
 export function saveSupabaseCredentials(url: string, key: string) {
-  localStorage.setItem('code_supabase_url', url.trim());
-  localStorage.setItem('code_supabase_key', key.trim());
+  const cleanUrl = normalizeSupabaseUrl(url);
+  const cleanKey = normalizeSupabaseKey(key);
+  localStorage.setItem('code_supabase_url', cleanUrl);
+  localStorage.setItem('code_supabase_key', cleanKey);
   cachedClient = null; // force re-create
+}
+
+export function clearSupabaseCredentials() {
+  localStorage.removeItem('code_supabase_url');
+  localStorage.removeItem('code_supabase_key');
+  cachedClient = null;
 }
 
 export function isSupabaseConfigured(): boolean {
@@ -66,7 +89,7 @@ export async function signInWithGitHub(): Promise<{ error: Error | null }> {
   const { error } = await client.auth.signInWithOAuth({
     provider: 'github',
     options: {
-      redirectTo: window.location.origin
+      redirectTo: `${window.location.origin}${window.location.pathname}`
     }
   });
 

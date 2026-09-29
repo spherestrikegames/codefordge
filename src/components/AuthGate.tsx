@@ -174,7 +174,7 @@ export const AuthGate: React.FC<AuthGateProps> = ({
         </div>
 
         {/* Form Body */}
-        <form onSubmit={handleSubmit} className="p-8 pt-5 space-y-4">
+        <form noValidate onSubmit={handleSubmit} className="p-8 pt-5 space-y-4">
           {errorMsg && (
             <div className="p-3 rounded-xl bg-red-950/60 border border-red-800 text-xs text-red-200">
               {errorMsg}

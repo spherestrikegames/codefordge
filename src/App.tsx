@@ -631,6 +631,7 @@ export default function App() {
         onOpenShareModal={() => setIsShareModalOpen(true)}
         onOpenUploadModal={() => setIsUploadModalOpen(true)}
         onOpenAuthModal={() => setIsAuthModalOpen(true)}
+        onOpenSupabaseModal={() => setIsSupabaseModalOpen(true)}
         onLogout={handleLogout}
         onNewSnippet={handleCreateNewSnippet}
         onToggleAiAgent={() => setIsAiAgentOpen(!isAiAgentOpen)}

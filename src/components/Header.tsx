@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { 
   Play, Share2, Plus, Code2, Check, 
-  UploadCloud, Sparkles, HardDrive, ChevronDown, User as UserIcon, LogIn, LogOut
+  UploadCloud, Sparkles, HardDrive, ChevronDown, User as UserIcon, LogIn, LogOut, Database
 } from 'lucide-react';
 import { Snippet, SupportedLanguage, User } from '../types';
 
@@ -13,6 +13,7 @@ interface HeaderProps {
   onOpenShareModal: () => void;
   onOpenUploadModal: () => void;
   onOpenAuthModal: () => void;
+  onOpenSupabaseModal?: () => void;
   onLogout: () => void;
   onNewSnippet: (lang?: SupportedLanguage) => void;
   onToggleAiAgent?: () => void;
@@ -33,6 +34,7 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenShareModal,
   onOpenUploadModal,
   onOpenAuthModal,
+  onOpenSupabaseModal,
   onLogout,
   onNewSnippet,
   onToggleAiAgent,
@@ -238,6 +240,18 @@ export const Header: React.FC<HeaderProps> = ({
           <Share2 className="w-3.5 h-3.5" />
           <span className="hidden sm:inline">Share</span>
         </button>
+
+        {/* Supabase Connection Button */}
+        {onOpenSupabaseModal && (
+          <button
+            onClick={onOpenSupabaseModal}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-[#282a30] hover:bg-[#333741] text-[#3ecf8e] border border-emerald-500/30 transition-all active:scale-95 whitespace-nowrap"
+            title="Connect / Configure Supabase"
+          >
+            <Database className="w-3.5 h-3.5" />
+            <span className="hidden md:inline">Supabase</span>
+          </button>
+        )}
 
         {/* User Account / Auth Button */}
         {!currentUser ? (

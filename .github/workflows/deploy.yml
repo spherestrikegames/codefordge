@@ -1,11 +1,7 @@
-name: Deploy Code Drive
+name: Deploy to GitHub Pages
 
 on:
   push:
-    branches:
-      - main
-      - master
-  pull_request:
     branches:
       - main
       - master
@@ -13,10 +9,16 @@ on:
 
 permissions:
   contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
 
 jobs:
-  build-and-test:
-    name: Build & Verify
+  build:
+    name: Build & Prepare
     runs-on: ubuntu-latest
 
     steps:
@@ -41,30 +43,33 @@ jobs:
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
 
-      - name: Archive Production Artifacts
-        uses: actions/upload-artifact@v4
+      - name: Add SPA 404 Fallback
+        run: cp dist/index.html dist/404.html
+
+      - name: Upload GitHub Pages Artifact
+        uses: actions/upload-pages-artifact@v3
         with:
-          name: dist-artifacts
           path: dist/
-          retention-days: 7
 
   deploy:
-    name: Deploy
-    needs: build-and-test
+    name: Deploy to GitHub Pages
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    needs: build
     runs-on: ubuntu-latest
-    if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') && github.event_name == 'push'
 
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
 
-      - name: Download Build Artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: dist-artifacts
-          path: dist
-
-      - name: Verify Distribution Output
+      - name: Display Live Site URL
         run: |
-          echo "Build completed successfully."
-          ls -la dist/
+          echo "### 🚀 Your Site is Live on GitHub Pages!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "🔗 **URL:** [${{ steps.deployment.outputs.page_url }}](${{ steps.deployment.outputs.page_url }})" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "========================================================"
+          echo "Live Site URL: ${{ steps.deployment.outputs.page_url }}"
+          echo "========================================================"
